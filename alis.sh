@@ -461,6 +461,12 @@ function partition() {
 
         pvcreate $DEVICE_LVM
         vgcreate $LVM_VOLUME_GROUP $DEVICE_LVM
+
+        # swap partition
+        if [ -n "$SWAP" -a "$SWAP" == "partition" ]; then
+            lvcreate -L ${SWAP_SIZE/[gG][iI][bB]/G} -n swap $LVM_VOLUME_GROUP
+        fi
+
         lvcreate -l 100%FREE -n $LVM_VOLUME_LOGICAL $LVM_VOLUME_GROUP
     fi
 
@@ -523,7 +529,7 @@ function partition() {
     # btrfs: https://btrfs.wiki.kernel.org/index.php/FAQ#Does_btrfs_support_swap_files.3F
     # btrfs: https://wiki.archlinux.org/index.php/Btrfs#Disabling_CoW
     # btrfs: https://jlk.fjfi.cvut.cz/arch/manpages/man/btrfs.5#MOUNT_OPTIONS
-    if [ -n "$SWAP_SIZE" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
+    if [ -n "$SWAP" -a "$SWAP" == "file" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
         fallocate -l $SWAP_SIZE "/mnt/swapfile"
         chmod 600 "/mnt/swapfile"
         mkswap "/mnt/swapfile"
@@ -567,9 +573,13 @@ function configuration() {
 
     genfstab -U /mnt >> /mnt/etc/fstab
 
-    if [ -n "$SWAP_SIZE" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
+    if [ -n "$SWAP" -a "$SWAP" == "file" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
         echo "# swap" >> /mnt/etc/fstab
         echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
+        echo "" >> /mnt/etc/fstab
+    else
+        echo "# swap" >> /mnt/etc/fstab
+        echo "/dev/mapper/$LVM_VOLUME_GROUP-swap none swap defaults 0 0" >> /mnt/etc/fstab
         echo "" >> /mnt/etc/fstab
     fi
 
