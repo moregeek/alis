@@ -44,6 +44,7 @@ ASCIINEMA=""
 BIOS_TYPE=""
 PARTITION_BOOT=""
 PARTITION_ROOT=""
+PARTITION_SWAP=""
 PARTITION_BOOT_NUMBER=""
 PARTITION_ROOT_NUMBER=""
 DEVICE_ROOT=""
@@ -51,12 +52,14 @@ DEVICE_LVM=""
 LUKS_DEVICE_NAME="cryptroot"
 LVM_VOLUME_GROUP="vg"
 LVM_VOLUME_LOGICAL="root"
-SWAPFILE=""
+SWAPFILE="/swapfile"
+SWAP=""
 BOOT_DIRECTORY=""
 ESP_DIRECTORY=""
 #PARTITION_BOOT_NUMBER=0
 UUID_BOOT=""
 UUID_ROOT=""
+UUID_SWAP=""
 PARTUUID_BOOT=""
 PARTUUID_ROOT=""
 DEVICE_SATA=""
@@ -66,6 +69,7 @@ CPU_VENDOR=""
 VIRTUALBOX=""
 CMDLINE_LINUX_ROOT=""
 CMDLINE_LINUX=""
+HIBERNATE=""
 
 CONF_FILE="alis.conf"
 GLOBALS_FILE="alis-globals.conf"
@@ -88,6 +92,7 @@ function sanitize_variables() {
     PARTITION_CUSTOMMANUAL_ROOT=$(sanitize_variable "$PARTITION_CUSTOMMANUAL_ROOT")
     FILE_SYSTEM_TYPE=$(sanitize_variable "$FILE_SYSTEM_TYPE")
     SWAP_SIZE=$(sanitize_variable "$SWAP_SIZE")
+    SWAP=$(sanitize_variable "$SWAP")
     KERNELS=$(sanitize_variable "$KERNELS")
     KERNELS_COMPRESSION=$(sanitize_variable "$KERNELS_COMPRESSION")
     SYSTEMD_HOMED_STORAGE=$(sanitize_variable "$SYSTEMD_HOMED_STORAGE")
@@ -116,6 +121,7 @@ function check_variables() {
     check_variables_boolean "DEVICE_TRIM" "$DEVICE_TRIM"
     check_variables_boolean "LVM" "$LVM"
     check_variables_list "FILE_SYSTEM_TYPE" "$FILE_SYSTEM_TYPE" "ext4 btrfs xfs"
+    check_variables_list "SWAP" "$SWAP" "file partition"
     check_variables_equals "LUKS_PASSWORD" "LUKS_PASSWORD_RETYPE" "$LUKS_PASSWORD" "$LUKS_PASSWORD_RETYPE"
     check_variables_list "PARTITION_MODE" "$PARTITION_MODE" "auto custom manual" "true"
     if [ "$PARTITION_MODE" == "custom" ]; then
@@ -465,6 +471,7 @@ function partition() {
         # swap partition
         if [ -n "$SWAP" -a "$SWAP" == "partition" ]; then
             lvcreate -L ${SWAP_SIZE/[gG][iI][bB]/G} -n swap $LVM_VOLUME_GROUP
+	    PARTITION_SWAP="/dev/mapper/$LVM_VOLUME_GROUP-swap"
         fi
 
         lvcreate -l 100%FREE -n $LVM_VOLUME_LOGICAL $LVM_VOLUME_GROUP
@@ -534,9 +541,11 @@ function partition() {
     # btrfs: https://wiki.archlinux.org/index.php/Btrfs#Disabling_CoW
     # btrfs: https://jlk.fjfi.cvut.cz/arch/manpages/man/btrfs.5#MOUNT_OPTIONS
     if [ -n "$SWAP" -a "$SWAP" == "file" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
-        fallocate -l $SWAP_SIZE "/mnt/swapfile"
-        chmod 600 "/mnt/swapfile"
-        mkswap "/mnt/swapfile"
+        fallocate -l $SWAP_SIZE "/mnt/$SWAPFILE"
+        chmod 600 "/mnt/$SWAPFILE"
+        mkswap -L swap "/mnt/swapfile"
+    elif [ -n "$SWAP" -a "$SWAP" == "partition" ]; then
+        mkswap -L swap $PARTITION_SWAP
     fi
 
     # set variables
@@ -546,6 +555,11 @@ function partition() {
     UUID_ROOT=$(blkid -s UUID -o value $PARTITION_ROOT)
     PARTUUID_BOOT=$(blkid -s PARTUUID -o value $PARTITION_BOOT)
     PARTUUID_ROOT=$(blkid -s PARTUUID -o value $PARTITION_ROOT)
+
+    if [ -n "$SWAP" ]; then
+        #PARTUUID_SWAP=$(blkid -s UUID -o value $PARTITION_SWAP)
+        UUID_SWAP=$(blkid -s UUID -o value $PARTITION_SWAP)
+    fi
 }
 
 function install() {
@@ -579,11 +593,12 @@ function configuration() {
 
     if [ -n "$SWAP" -a "$SWAP" == "file" -a "$FILE_SYSTEM_TYPE" != "btrfs" ]; then
         echo "# swap" >> /mnt/etc/fstab
-        echo "/swapfile none swap defaults 0 0" >> /mnt/etc/fstab
+        echo "$SWAPFILE none swap defaults 0 0" >> /mnt/etc/fstab
         echo "" >> /mnt/etc/fstab
-    else
+    elif [ -n "$SWAP" -a "$SWAP" == "partition" ]; then
         echo "# swap" >> /mnt/etc/fstab
-        echo "/dev/mapper/$LVM_VOLUME_GROUP-swap none swap defaults 0 0" >> /mnt/etc/fstab
+        #echo "/dev/mapper/$LVM_VOLUME_GROUP-swap none swap defaults 0 0" >> /mnt/etc/fstab
+        echo "UUID=$UUID_SWAP none swap defaults 0 0" >> /mnt/etc/fstab
         echo "" >> /mnt/etc/fstab
     fi
 
@@ -686,6 +701,10 @@ function mkinitcpio_configuration() {
             HOOKS=$(echo $HOOKS | sed 's/!encrypt/encrypt/')
         fi
     fi
+    if [ -n "$HIBERNATE" ]; then
+      HOOKS=$(echo $HOOKS | sed 's/!resume/resume/')
+    fi
+
     HOOKS=$(sanitize_variable "$HOOKS")
     arch-chroot /mnt sed -i "s/^HOOKS=(.*)$/HOOKS=($HOOKS)/" /etc/mkinitcpio.conf
 
@@ -849,20 +868,28 @@ function bootloader() {
             pacman_install "amd-ucode"
         fi
     fi
+
     if [ "$LVM" == "true" ]; then
         CMDLINE_LINUX_ROOT="root=$DEVICE_ROOT"
     else
         CMDLINE_LINUX_ROOT="root=PARTUUID=$PARTUUID_ROOT"
     fi
+
     if [ -n "$LUKS_PASSWORD" ]; then
         if [ "$DEVICE_TRIM" == "true" ]; then
             BOOTLOADER_ALLOW_DISCARDS=":allow-discards"
         fi
         CMDLINE_LINUX="cryptdevice=PARTUUID=$PARTUUID_ROOT:$LUKS_DEVICE_NAME$BOOTLOADER_ALLOW_DISCARDS"
     fi
+
     if [ "$FILE_SYSTEM_TYPE" == "btrfs" ]; then
         CMDLINE_LINUX="$CMDLINE_LINUX rootflags=subvol=@"
     fi
+
+    if [ -n "$SWAP" -a -n "$HIBERNATE" ]; then
+        CMDLINE_LINUX="$CMDLINE_LINUX resume=UUID=$UUID_SWAP"
+    fi
+
     if [ "$KMS" == "true" ]; then
         case "$DISPLAY_DRIVER" in
             "nvidia" | "nvidia-390xx" | "nvidia-390xx-lts" )
@@ -1467,6 +1494,7 @@ ASCIINEMA="$ASCIINEMA"
 BIOS_TYPE="$BIOS_TYPE"
 PARTITION_BOOT="$PARTITION_BOOT"
 PARTITION_ROOT="$PARTITION_ROOT"
+PARTITION_SWAP="$PARTITION_SWAP"
 PARTITION_BOOT_NUMBER="$PARTITION_BOOT_NUMBER"
 PARTITION_ROOT_NUMBER="$PARTITION_ROOT_NUMBER"
 DEVICE_ROOT="$DEVICE_ROOT"
@@ -1479,6 +1507,7 @@ BOOT_DIRECTORY="$BOOT_DIRECTORY"
 ESP_DIRECTORY="$ESP_DIRECTORY"
 UUID_BOOT="$UUID_BOOT"
 UUID_ROOT="$UUID_ROOT"
+UUID_SWAP="$UUID_SWAP"
 PARTUUID_BOOT="$PARTUUID_BOOT"
 PARTUUID_ROOT="$PARTUUID_ROOT"
 DEVICE_SATA="$DEVICE_SATA"
@@ -1488,6 +1517,7 @@ CPU_VENDOR="$CPU_VENDOR"
 VIRTUALBOX="$VIRTUALBOX"
 CMDLINE_LINUX_ROOT="$CMDLINE_LINUX_ROOT"
 CMDLINE_LINUX="$CMDLINE_LINUX"
+HIBERNATE="$HIBERNATE"
 EOT
 }
 
